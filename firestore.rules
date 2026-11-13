@@ -1,0 +1,44 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // users/{uid} - private profile
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+
+      allow create: if isOwner(userId)
+        && request.resource.data.uid == userId
+        && request.resource.data.email is string
+        && request.resource.data.createdAt is timestamp;
+
+      allow update: if isOwner(userId)
+        && request.resource.data.uid == userId;
+
+      allow delete: if isOwner(userId);
+
+      // users/{uid}/sessions/{sessionId} - EOG monitoring sessions
+      match /sessions/{sessionId} {
+        allow read, write: if isOwner(userId);
+
+        // users/{uid}/sessions/{sessionId}/predictions/{predictionId}
+        match /predictions/{predictionId} {
+          allow read, write: if isOwner(userId);
+        }
+      }
+    }
+
+    // Deny everything else.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

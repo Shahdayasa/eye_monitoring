@@ -1,8 +1,24 @@
-
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:provider/provider.dart';
 import 'firebase_options.dart';
+import 'core/config/app_config.dart';
+import 'core/connectivity/connectivity_service.dart';
+import 'core/theme/app_theme.dart';
+import 'core/router/app_router.dart';
+import 'core/utils/app_snackbar.dart';
+import 'features/authentication/data/auth_repository.dart';
+import 'features/authentication/presentation/auth_provider.dart';
+import 'features/device/presentation/ble_provider.dart';
+import 'features/history/data/session_repository.dart';
+import 'features/history/presentation/session_provider.dart';
+import 'features/monitoring/presentation/monitoring_provider.dart';
+import 'features/predictions/data/prediction_repository.dart';
+import 'features/predictions/presentation/prediction_provider.dart';
+import 'services/ble/ble_service.dart';
+import 'services/ble/flutter_blue_plus_ble_service.dart';
+import 'services/ble/mock_ble_service.dart';
+import 'shared/widgets/offline_banner.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -19,337 +35,89 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(
+          create: (_) => ConnectivityService()..initialize(),
+        ),
+        Provider<AuthRepository>(
+          create: (context) => AuthRepository(),
+        ),
+        ChangeNotifierProvider(
+          create: (context) => AuthProvider(
+            context.read<AuthRepository>(),
+          ),
+        ),
+        Provider<BleService>(
+          create: (_) => AppConfig.useMockBle
+              ? MockBleService()
+              : FlutterBluePlusBleService(),
+          dispose: (_, service) => service.dispose(),
+        ),
+        ChangeNotifierProvider(
+          create: (context) => BleProvider(context.read<BleService>()),
+        ),
+        ChangeNotifierProvider(
+          create: (context) => MonitoringProvider(context.read<BleService>()),
+        ),
+        Provider<SessionRepositoryBase>(
+          create: (_) => SessionRepository(),
+        ),
+        ChangeNotifierProvider(
+          create: (context) => SessionProvider(
+            repository: context.read<SessionRepositoryBase>(),
+            bleService: context.read<BleService>(),
+          ),
+        ),
+        Provider<PredictionRepository>(
+          create: (_) => PredictionRepository(),
+          dispose: (_, repo) => repo.dispose(),
+        ),
+        ChangeNotifierProvider(
+          create: (context) => PredictionProvider(
+            repository: context.read<PredictionRepository>(),
+            monitoringProvider: context.read<MonitoringProvider>(),
+            bleProvider: context.read<BleProvider>(),
+            authProvider: context.read<AuthProvider>(),
+            sessionProvider: context.read<SessionProvider>(),
+            sessionRepository: context.read<SessionRepositoryBase>(),
+          ),
+        ),
+      ],
+      child: const AppView(),
+    );
+  }
+}
+
+class AppView extends StatefulWidget {
+  const AppView({super.key});
+
+  @override
+  State<AppView> createState() => _AppViewState();
+}
+
+class _AppViewState extends State<AppView> {
+  late final AppRouter _appRouter;
+
+  @override
+  void initState() {
+    super.initState();
+    _appRouter = AppRouter(
+      authProvider: context.read<AuthProvider>(),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp.router(
       debugShowCheckedModeBanner: false,
+      scaffoldMessengerKey: rootScaffoldMessengerKey,
       title: 'Eye Monitoring',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.teal,
-        ),
-        useMaterial3: true,
-      ),
-      home: const AuthGate(),
-    );
-  }
-}
-
-// Checks whether the user is already logged in.
-class AuthGate extends StatelessWidget {
-  const AuthGate({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.authStateChanges(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          );
-        }
-
-        if (snapshot.hasData) {
-          return const HomePage();
-        }
-
-        return const AuthPage();
-      },
-    );
-  }
-}
-
-// Login and Sign Up screen.
-class AuthPage extends StatefulWidget {
-  const AuthPage({super.key});
-
-  @override
-  State<AuthPage> createState() => _AuthPageState();
-}
-
-class _AuthPageState extends State<AuthPage> {
-  final _formKey = GlobalKey<FormState>();
-
-  final _nameController = TextEditingController();
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
-
-  bool _isLogin = true;
-  bool _isLoading = false;
-  bool _obscurePassword = true;
-
-  @override
-  void dispose() {
-    _nameController.dispose();
-    _emailController.dispose();
-    _passwordController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _submit() async {
-    if (!_formKey.currentState!.validate()) return;
-
-    setState(() => _isLoading = true);
-
-    try {
-      final auth = FirebaseAuth.instance;
-
-      if (_isLogin) {
-        await auth.signInWithEmailAndPassword(
-          email: _emailController.text.trim(),
-          password: _passwordController.text.trim(),
-        );
-      } else {
-        final credential =
-            await auth.createUserWithEmailAndPassword(
-          email: _emailController.text.trim(),
-          password: _passwordController.text.trim(),
-        );
-
-        await credential.user?.updateDisplayName(
-          _nameController.text.trim(),
-        );
-      }
-    } on FirebaseAuthException catch (e) {
-      String message;
-
-      switch (e.code) {
-        case 'email-already-in-use':
-          message = 'This email is already registered.';
-          break;
-        case 'invalid-email':
-          message = 'Please enter a valid email address.';
-          break;
-        case 'weak-password':
-          message = 'Password must be at least 6 characters.';
-          break;
-        case 'user-not-found':
-        case 'wrong-password':
-        case 'invalid-credential':
-          message = 'Incorrect email or password.';
-          break;
-        case 'network-request-failed':
-          message = 'Check your internet connection.';
-          break;
-        default:
-          message = e.message ?? 'Authentication failed.';
-      }
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(message)),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Something went wrong. Please try again.'),
-          ),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Form(
-            key: _formKey,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(
-                  Icons.remove_red_eye,
-                  size: 75,
-                  color: Colors.teal,
-                ),
-                const SizedBox(height: 16),
-
-                const Text(
-                  'Eye Monitoring',
-                  style: TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-
-                const SizedBox(height: 8),
-
-                Text(
-                  _isLogin
-                      ? 'Welcome back! Please log in.'
-                      : 'Create your account.',
-                  style: const TextStyle(color: Colors.grey),
-                ),
-
-                const SizedBox(height: 30),
-
-                if (!_isLogin) ...[
-                  TextFormField(
-                    controller: _nameController,
-                    decoration: const InputDecoration(
-                      labelText: 'Full Name',
-                      prefixIcon: Icon(Icons.person),
-                      border: OutlineInputBorder(),
-                    ),
-                    validator: (value) {
-                      if (!_isLogin &&
-                          (value == null || value.trim().isEmpty)) {
-                        return 'Please enter your name.';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                ],
-
-                TextFormField(
-                  controller: _emailController,
-                  keyboardType: TextInputType.emailAddress,
-                  decoration: const InputDecoration(
-                    labelText: 'Email',
-                    prefixIcon: Icon(Icons.email),
-                    border: OutlineInputBorder(),
-                  ),
-                  validator: (value) {
-                    if (value == null || value.trim().isEmpty) {
-                      return 'Please enter your email.';
-                    }
-                    if (!value.contains('@')) {
-                      return 'Please enter a valid email.';
-                    }
-                    return null;
-                  },
-                ),
-
-                const SizedBox(height: 16),
-
-                TextFormField(
-                  controller: _passwordController,
-                  obscureText: _obscurePassword,
-                  decoration: InputDecoration(
-                    labelText: 'Password',
-                    prefixIcon: const Icon(Icons.lock),
-                    suffixIcon: IconButton(
-                      icon: Icon(
-                        _obscurePassword
-                            ? Icons.visibility
-                            : Icons.visibility_off,
-                      ),
-                      onPressed: () {
-                        setState(() {
-                          _obscurePassword = !_obscurePassword;
-                        });
-                      },
-                    ),
-                    border: const OutlineInputBorder(),
-                  ),
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Please enter your password.';
-                    }
-                    if (value.length < 6) {
-                      return 'Password must be at least 6 characters.';
-                    }
-                    return null;
-                  },
-                ),
-
-                const SizedBox(height: 24),
-
-                SizedBox(
-                  width: double.infinity,
-                  height: 50,
-                  child: ElevatedButton(
-                    onPressed: _isLoading ? null : _submit,
-                    child: _isLoading
-                        ? const CircularProgressIndicator()
-                        : Text(
-                            _isLogin ? 'Login' : 'Create Account',
-                            style: const TextStyle(fontSize: 16),
-                          ),
-                  ),
-                ),
-
-                const SizedBox(height: 16),
-
-                TextButton(
-                  onPressed: _isLoading
-                      ? null
-                      : () {
-                          setState(() {
-                            _isLogin = !_isLogin;
-                          });
-                        },
-                  child: Text(
-                    _isLogin
-                        ? "Don't have an account? Sign Up"
-                        : 'Already have an account? Login',
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// Screen shown after successful authentication.
-class HomePage extends StatelessWidget {
-  const HomePage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final user = FirebaseAuth.instance.currentUser;
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Eye Monitoring'),
-        backgroundColor: Colors.teal,
-        foregroundColor: Colors.white,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Logout',
-            onPressed: () async {
-              await FirebaseAuth.instance.signOut();
-            },
-          ),
-        ],
-      ),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(
-              Icons.cloud_done,
-              color: Colors.green,
-              size: 65,
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Welcome to Eye Monitoring!',
-              style: TextStyle(
-                fontSize: 21,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(user?.email ?? ''),
-            const SizedBox(height: 24),
-            const Text('You are successfully logged in.'),
-          ],
-        ),
-      ),
+      theme: AppTheme.light(),
+      darkTheme: AppTheme.dark(),
+      themeMode: ThemeMode.system,
+      routerConfig: _appRouter.router,
+      builder: (context, child) => OfflineBanner(child: child ?? const SizedBox.shrink()),
     );
   }
 }
